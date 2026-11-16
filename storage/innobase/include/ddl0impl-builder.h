@@ -316,6 +316,20 @@ struct Builder {
   @return DB_SUCCESS or error code. */
   [[nodiscard]] dberr_t batch_add_row(Row &row, size_t thread_id) noexcept;
 
+  /** @return true if all the user-defined key fields of a custom index
+  entry are NULL.
+  @param[in] fields             Fields of the entry. */
+  [[nodiscard]] bool is_custom_key_null(const dfield_t *fields) const noexcept;
+
+  /** Insert an entry into a custom index's extension storage. The insert fills
+  in the entry's key reference field.
+  @param[in,out] fields         Fields of the entry.
+  @param[in] n_fields           Number of fields.
+  @param[in,out] heap           Heap for the entry.
+  @return DB_SUCCESS or error code. */
+  [[nodiscard]] dberr_t custom_insert(dfield_t *fields, size_t n_fields,
+                                      mem_heap_t *heap) noexcept;
+
   /** Add a row to the merge buffer.
   @param[in,out]        cursor        Current scan cursor.
   @param[in,out] row            Row to add.

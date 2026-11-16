@@ -48,7 +48,8 @@ struct Compare_key {
       : m_dups(dups),
         m_n_unique(dict_index_get_n_unique(index)),
         m_n_fields(compare_all ? dict_index_get_n_fields(index) : m_n_unique),
-        m_fields(index->fields) {
+        m_fields(index->fields),
+        m_mapping_btree(index->has_mapping_btree()) {
     ut_a(m_n_unique <= m_n_fields);
     ut_a(m_dups == nullptr || index == m_dups->m_index);
   }
@@ -78,7 +79,7 @@ struct Compare_key {
     int cmp;
 
     do {
-      cmp = cmp_dfield_dfield(lhs_f++, rhs_f++, f++);
+      cmp = compare_field(lhs_f++, rhs_f++, f++);
     } while (cmp == 0 && --n);
 
     if (cmp != 0) {
@@ -107,7 +108,7 @@ struct Compare_key {
     /* The m_n_unique fields were equal, but we compare all fields so
     that we will get the same (internal) order as in the B-tree. */
     for (auto n = m_n_fields - m_n_unique + 1; --n;) {
-      cmp = cmp_dfield_dfield(lhs_f++, rhs_f++, f++);
+      cmp = compare_field(lhs_f++, rhs_f++, f++);
       if (cmp != 0) {
         return cmp;
       }
@@ -117,6 +118,27 @@ struct Compare_key {
     in the PRIMARY KEY that has not been detected yet. Internally, an index
     must never contain duplicates. */
     return cmp;
+  }
+
+  /** Compare two fields.
+  @param[in] lhs                Field on the left hand side
+  @param[in] rhs                Field on the right hand side
+  @param[in] field              Index field
+  @return as cmp_dfield_dfield() */
+  int compare_field(const dfield_t *lhs, const dfield_t *rhs,
+                    const dict_field_t *field) const noexcept {
+    if (!m_mapping_btree) {
+      return cmp_dfield_dfield(lhs, rhs, field);
+    }
+    /* VillageSQL: a custom index's mapping B-tree orders its fields by their
+    stored bytes, not by the custom type's compare, as rem0cmp does for its
+    records. Sort in the same order. */
+    const dtype_t *type = dfield_get_type(lhs);
+    return cmp_data_data(type->mtype, type->prtype, field->is_ascending,
+                         static_cast<const byte *>(dfield_get_data(lhs)),
+                         dfield_get_len(lhs),
+                         static_cast<const byte *>(dfield_get_data(rhs)),
+                         dfield_get_len(rhs), nullptr);
   }
 
   /** For collecting duplicates. */
@@ -130,6 +152,9 @@ struct Compare_key {
 
   /** Index key fields. */
   const dict_field_t *m_fields{};
+
+  /** True if the index is a custom index's mapping B-tree. */
+  const bool m_mapping_btree{};
 };
 
 }  // namespace ddl

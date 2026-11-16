@@ -1,0 +1,77 @@
+# ALTER TABLE ... ALGORITHM=COPY on a table with a KNN index. The copy inserts
+# every row into the new table, so the new table's KNN index has to hold all
+# the rows, and DML afterwards has to find their entries.
+#
+# Distances from [1,0,0,0], all different:
+#   id=1 [1,0,0,0] 0, id=4 [1,1,0,0] 1, id=2 [0,1,0,0] 1.41,
+#   id=5 [3,0,0,0] 2, id=3 [0,0,3,0] 3.16
+
+INSTALL EXTENSION vsql_knn_index_test;
+
+CREATE TABLE t (
+  id INT PRIMARY KEY,
+  v KVECTOR
+);
+CREATE INDEX idx_v ON t (v)
+  USING EXTENDED(vsql_knn_index_test.kvec_l2);
+INSERT INTO t VALUES
+  (1, '[1,0,0,0]'),
+  (2, '[0,1,0,0]'),
+  (3, '[0,0,3,0]'),
+  (4, '[1,1,0,0]'),
+  (5, '[3,0,0,0]');
+
+--echo # Expected: 1, 4, 2
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 3;
+
+--echo #
+--echo # ADD COLUMN with ALGORITHM=COPY.
+--echo #
+ALTER TABLE t ADD COLUMN extra INT, ALGORITHM=COPY;
+--replace_regex /cost=[0-9.e+-]+/cost=COST/ /rows=[0-9.e+-]+/rows=ROWS/
+EXPLAIN FORMAT=tree
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 3;
+--echo # Expected: 1, 4, 2, 5, 3
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 5;
+
+--echo #
+--echo # FORCE with ALGORITHM=COPY.
+--echo #
+ALTER TABLE t FORCE, ALGORITHM=COPY;
+--echo # Expected: 1, 4, 2, 5, 3
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 5;
+
+--echo #
+--echo # DROP COLUMN with ALGORITHM=COPY.
+--echo #
+ALTER TABLE t DROP COLUMN extra, ALGORITHM=COPY;
+--echo # Expected: 1, 4, 2, 5, 3
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 5;
+
+--echo #
+--echo # DML on the copied table finds the copied entries.
+--echo #
+DELETE FROM t WHERE id = 4;
+UPDATE t SET v = '[1,0,1,0]' WHERE id = 3;
+INSERT INTO t VALUES (6, '[1.5,0,0,0]');
+--echo # Distances now: 1 0, 6 0.5, 3 1, 2 1.41, 5 2
+--echo # Expected: 1, 6, 3, 2, 5
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 5;
+SELECT COUNT(*) FROM t;
+
+--echo #
+--echo # A further COPY after the DML.
+--echo #
+ALTER TABLE t FORCE, ALGORITHM=COPY;
+--echo # Expected: 1, 6, 3, 2, 5
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 10;
+
+DROP TABLE t;
+UNINSTALL EXTENSION vsql_knn_index_test;

@@ -1,0 +1,100 @@
+INSTALL EXTENSION vsql_knn_index_test;
+CREATE TABLE t (
+id INT PRIMARY KEY,
+v KVECTOR
+);
+CREATE INDEX idx_v ON t (v)
+USING EXTENDED(vsql_knn_index_test.kvec_l2);
+INSERT INTO t VALUES
+(1, '[1,0,0,0]'),
+(2, '[0,1,0,0]'),
+(3, '[0,0,3,0]'),
+(4, '[1,1,0,0]'),
+(5, '[3,0,0,0]');
+# Expected: 1, 4, 2
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 3;
+id
+1
+4
+2
+#
+# ADD COLUMN with ALGORITHM=COPY.
+#
+ALTER TABLE t ADD COLUMN extra INT, ALGORITHM=COPY;
+EXPLAIN FORMAT=tree
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 3;
+EXPLAIN
+-> Limit: 3 row(s)  (cost=COST rows=ROWS)
+    -> Index KNN scan on t using idx_v (v <-> '[1,0,0,0]'), limit 3  (cost=COST rows=ROWS)
+
+# Expected: 1, 4, 2, 5, 3
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 5;
+id
+1
+4
+2
+5
+3
+#
+# FORCE with ALGORITHM=COPY.
+#
+ALTER TABLE t FORCE, ALGORITHM=COPY;
+# Expected: 1, 4, 2, 5, 3
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 5;
+id
+1
+4
+2
+5
+3
+#
+# DROP COLUMN with ALGORITHM=COPY.
+#
+ALTER TABLE t DROP COLUMN extra, ALGORITHM=COPY;
+# Expected: 1, 4, 2, 5, 3
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 5;
+id
+1
+4
+2
+5
+3
+#
+# DML on the copied table finds the copied entries.
+#
+DELETE FROM t WHERE id = 4;
+UPDATE t SET v = '[1,0,1,0]' WHERE id = 3;
+INSERT INTO t VALUES (6, '[1.5,0,0,0]');
+# Distances now: 1 0, 6 0.5, 3 1, 2 1.41, 5 2
+# Expected: 1, 6, 3, 2, 5
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 5;
+id
+1
+6
+3
+2
+5
+SELECT COUNT(*) FROM t;
+COUNT(*)
+5
+#
+# A further COPY after the DML.
+#
+ALTER TABLE t FORCE, ALGORITHM=COPY;
+# Expected: 1, 6, 3, 2, 5
+SELECT id FROM t
+ORDER BY vsql_knn_index_test.kvec_l2_distance(v, '[1,0,0,0]') LIMIT 10;
+id
+1
+6
+3
+2
+5
+DROP TABLE t;
+UNINSTALL EXTENSION vsql_knn_index_test;

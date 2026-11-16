@@ -1286,12 +1286,14 @@ dberr_t Custom_column::fetch_for_bulk_ddl(const dict_index_t *new_index,
     return DB_SUCCESS;
   };
 
-  // No col_map: old and new tables are the same. Position i is valid in both
-  // old and new index; fetch each extended field at its current position.
+  // No col_map: old and new tables are the same. fields belongs to new_index,
+  // so field i's column is new_index->get_field(i)->col. It is not
+  // old_index's: a secondary index built over the table's clustered index has
+  // its fields in a different order.
   if (col_map == nullptr) {
     for (uint32_t i = 0; i < n_fields; i++) {
       if (!fields[i].is_extended()) continue;
-      auto err = fetch_at(i, old_index->get_field(i)->col);
+      auto err = fetch_at(i, new_index->get_field(i)->col);
       if (err != DB_SUCCESS) return err;
     }
     return DB_SUCCESS;

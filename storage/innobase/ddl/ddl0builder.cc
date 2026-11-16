@@ -899,6 +899,15 @@ dberr_t Builder::copy_columns(Copy_ctx &ctx, size_t &mv_rows_added,
   const auto page_size = dict_table_page_size(m_ctx.m_old_table);
 
   for (size_t i = 0; i < ctx.m_n_fields; ++i, ++field, ++ifield) {
+    /* VillageSQL: the key reference field of a custom index's mapping B-tree
+    is not a table column. Reserve it here; copy_row() has the extension's
+    insert fill it in. */
+    if (villagesql::innodb::Custom_index::set_extra_field(m_index, i, field,
+                                                          key_buffer->heap())) {
+      ctx.m_data_size += dfield_get_len(field);
+      continue;
+    }
+
     const auto col = ifield->col;
     const auto col_no = dict_col_get_no(col);
 
@@ -1087,6 +1096,15 @@ dberr_t Builder::copy_row(Copy_ctx &ctx, size_t &mv_rows_added) noexcept {
     }
 #endif /* UNIV_DEBUG */
 
+    /* VillageSQL: like DML, a row whose custom index key is NULL has no
+    entry in the extension's index or in the mapping B-tree. */
+    if (is_custom_index() &&
+        is_custom_key_null(key_buffer->m_dtuples[key_buffer->size()])) {
+      key_buffer->pop_unfinished_tuple();
+      ctx.m_n_rows_added = 0;
+      return DB_SUCCESS;
+    }
+
     /* Add to the total size of the record in the output buffer,
     the encoded length of extra_size and the extra bytes (extra_size).
     See Key_sort_buffer::write() for the variable-length encoding
@@ -1114,7 +1132,26 @@ dberr_t Builder::copy_row(Copy_ctx &ctx, size_t &mv_rows_added) noexcept {
 
     bool has_extended = key_buffer->deep_copy(ctx.m_n_fields, ctx.m_data_size);
 
-    if (has_extended) {
+    if (is_custom_index()) {
+      /* VillageSQL: as in DML, the extension's insert gets an extended column
+      as its reference followed by its value, while the mapping B-tree record
+      keeps only the reference. Fetch the value from the scanned table's column
+      store. */
+      if (has_extended) {
+        auto err = villagesql::innodb::Custom_column::fetch_for_bulk_ddl(
+            key_buffer->m_index, m_ctx.m_old_table->first_index(),
+            m_ctx.m_col_map, ctx.m_n_fields, key_buffer->back(),
+            key_buffer->heap());
+        if (err != DB_SUCCESS) {
+          return err;
+        }
+      }
+      auto err =
+          custom_insert(key_buffer->back(), ctx.m_n_fields, key_buffer->heap());
+      if (err != DB_SUCCESS) {
+        return err;
+      }
+    } else if (has_extended) {
       using villagesql::innodb::Custom_column;
       auto err = Custom_column::fetch_for_bulk_ddl(
           key_buffer->m_index, old_index, m_ctx.m_col_map, ctx.m_n_fields,
@@ -1351,6 +1388,28 @@ dberr_t Builder::batch_add_row(Row &row, size_t thread_id) noexcept {
   rtree_inserter->add_to_batch(row.m_ptr, row.m_ext);
 
   return DB_SUCCESS;
+}
+
+bool Builder::is_custom_key_null(const dfield_t *fields) const noexcept {
+  for (size_t i = 0; i < m_index->n_user_defined_cols; ++i) {
+    if (!dfield_is_null(&fields[i])) return false;
+  }
+  return true;
+}
+
+dberr_t Builder::custom_insert(dfield_t *fields, size_t n_fields,
+                               mem_heap_t *heap) noexcept {
+  /* The entry shares the fields' data, so the key reference the insert writes
+  lands in the key buffer. */
+  dtuple_t *entry = dtuple_create(heap, n_fields);
+  for (size_t i = 0; i < n_fields; ++i) {
+    entry->fields[i] = fields[i];
+  }
+  dtuple_set_n_fields_cmp(entry, n_fields);
+
+  bool skip_index = false;
+  return villagesql::innodb::Custom_index::insert(
+      m_index, m_ctx.m_trx->id, entry, /*dup_chk_only=*/false, &skip_index);
 }
 
 dberr_t Builder::enqueue_parsing(const dtuple_t &row) noexcept {
