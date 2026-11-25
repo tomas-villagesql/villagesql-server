@@ -1,0 +1,135 @@
+# A vsql::sys_var variable can require a privilege to be set. The server checks
+# it on every SET statement that assigns the variable, alongside the
+# SYSTEM_VARIABLES_ADMIN that MySQL already requires. The extension's own
+# writes through SYS_VARS.set() are not SET statements and are not checked.
+#
+# vsql_sys_var_priv_test declares:
+#   guarded    requires VSQL_SYS_VAR_PRIV_TEST_ADMIN, which the server
+#              registers when the extension loads
+#   key_label  requires ENCRYPTION_KEY_ADMIN, which MySQL defines
+#   open       requires nothing extra
+
+--source include/count_sessions.inc
+
+call mtr.add_suppression("which is not a dynamic privilege name");
+
+SET PERSIST vsql_allow_preview_extensions = ON;
+
+--echo # A variable cannot require a static privilege: INSTALL fails and
+--echo # registers none of the extension's variables
+--error ER_VILLAGESQL_GENERIC_ERROR
+INSTALL EXTENSION vsql_sys_var_bad_priv_test;
+--error ER_UNKNOWN_SYSTEM_VARIABLE
+SELECT @@global.vsql_sys_var_bad_priv_test.first;
+
+INSTALL EXTENSION vsql_sys_var_priv_test;
+
+--echo # Loading the extension registered its privilege, so it can be granted
+CREATE USER u_plain@localhost, u_admin@localhost, u_key@localhost;
+GRANT SYSTEM_VARIABLES_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.*
+  TO u_plain@localhost, u_admin@localhost, u_key@localhost;
+GRANT VSQL_SYS_VAR_PRIV_TEST_ADMIN ON *.* TO u_admin@localhost;
+GRANT ENCRYPTION_KEY_ADMIN ON *.* TO u_key@localhost;
+SHOW GRANTS FOR u_admin@localhost;
+
+CREATE PROCEDURE test.set_guarded(v INT) SQL SECURITY INVOKER
+  SET GLOBAL vsql_sys_var_priv_test.guarded = v;
+GRANT EXECUTE ON PROCEDURE test.set_guarded TO u_plain@localhost,
+  u_admin@localhost;
+
+--echo # root was not granted the new privilege, so it cannot set guarded
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET GLOBAL vsql_sys_var_priv_test.guarded = 5;
+
+--connect (plain, localhost, u_plain,,)
+--echo # Without the privilege, every form of SET on guarded is refused
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET GLOBAL vsql_sys_var_priv_test.guarded = 5;
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET @@global.vsql_sys_var_priv_test.guarded = 5;
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET GLOBAL vsql_sys_var_priv_test.guarded = DEFAULT;
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET PERSIST vsql_sys_var_priv_test.guarded = 5;
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET PERSIST_ONLY vsql_sys_var_priv_test.guarded = 5;
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+PREPARE s FROM 'SET GLOBAL vsql_sys_var_priv_test.guarded = 5';
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+CALL test.set_guarded(5);
+
+--echo # A SET that also assigns guarded is refused as a whole
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET GLOBAL vsql_sys_var_priv_test.open = 7,
+           vsql_sys_var_priv_test.guarded = 5;
+SELECT @@global.vsql_sys_var_priv_test.open;
+
+--echo # guarded is unchanged, and reading it needs no privilege
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+
+--echo # A variable that requires nothing is still settable
+SET GLOBAL vsql_sys_var_priv_test.open = 7;
+SELECT @@global.vsql_sys_var_priv_test.open;
+
+--echo # key_label requires ENCRYPTION_KEY_ADMIN
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET GLOBAL vsql_sys_var_priv_test.key_label = 'plain';
+
+--echo # The extension's own write is not a SET statement and is not checked
+SELECT vsql_sys_var_priv_test.write_guarded(6) AS err;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+--disconnect plain
+
+--connect (admin, localhost, u_admin,,)
+--echo # With the privilege, every form of SET on guarded works
+SET GLOBAL vsql_sys_var_priv_test.guarded = 10;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+SET GLOBAL vsql_sys_var_priv_test.guarded = DEFAULT;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+SET PERSIST vsql_sys_var_priv_test.guarded = 20;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+SET PERSIST_ONLY vsql_sys_var_priv_test.guarded = 30;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+CALL test.set_guarded(40);
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+
+--echo # A prepared SET runs more than once
+PREPARE s FROM 'SET GLOBAL vsql_sys_var_priv_test.guarded = ?';
+SET @v = 50;
+EXECUTE s USING @v;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+SET @v = 60;
+EXECUTE s USING @v;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+DEALLOCATE PREPARE s;
+
+--echo # The privilege for guarded does not cover key_label
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET GLOBAL vsql_sys_var_priv_test.key_label = 'admin';
+--disconnect admin
+
+--connect (key, localhost, u_key,,)
+--echo # ENCRYPTION_KEY_ADMIN covers key_label but not guarded
+SET GLOBAL vsql_sys_var_priv_test.key_label = 'key';
+SELECT @@global.vsql_sys_var_priv_test.key_label;
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET GLOBAL vsql_sys_var_priv_test.guarded = 70;
+--disconnect key
+
+--connection default
+--echo # Revoking the privilege takes effect for a new session
+REVOKE VSQL_SYS_VAR_PRIV_TEST_ADMIN ON *.* FROM u_admin@localhost;
+--connect (admin, localhost, u_admin,,)
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET GLOBAL vsql_sys_var_priv_test.guarded = 80;
+--disconnect admin
+
+--connection default
+RESET PERSIST vsql_sys_var_priv_test.guarded;
+DROP PROCEDURE test.set_guarded;
+DROP USER u_plain@localhost, u_admin@localhost, u_key@localhost;
+UNINSTALL EXTENSION vsql_sys_var_priv_test;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;
+
+--source include/wait_until_count_sessions.inc

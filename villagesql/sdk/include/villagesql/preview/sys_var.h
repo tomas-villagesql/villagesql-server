@@ -114,6 +114,13 @@ class SysVarChange {
 //   sv::make_int("threshold_ms", "Threshold", &g_threshold, 1000, 0, 3600000)
 //       .on_change<&my_on_change>()
 //
+// To require a privilege for setting the variable, chain .require_privilege():
+//
+//   sv::make_int("threshold_ms", "Threshold", &g_threshold, 1000, 0, 3600000)
+//       .require_privilege("MY_EXT_ADMIN")
+//
+// See vef_sys_var_desc_t::required_privilege for the rules.
+//
 // The callback runs while the server holds its global system-variable lock, so
 // it must stay short and non-blocking. Reading or writing another of this
 // extension's variables through its storage pointer is safe and immediately
@@ -154,6 +161,7 @@ struct SysVarDescriptor {
     } enumeration;
   };
   vef_sys_var_on_change_func_t on_change_fn = nullptr;
+  const char *required_privilege = nullptr;
 
   template <void (*Fn)(SysVarChange)>
   constexpr SysVarDescriptor on_change() const {
@@ -161,6 +169,13 @@ struct SysVarDescriptor {
     copy.on_change_fn = [](const vef_sys_var_change_t *c) {
       Fn(SysVarChange(c));
     };
+    return copy;
+  }
+
+  // An account must hold `privilege` to set this variable.
+  constexpr SysVarDescriptor require_privilege(const char *privilege) const {
+    SysVarDescriptor copy = *this;
+    copy.required_privilege = privilege;
     return copy;
   }
 };
@@ -199,6 +214,7 @@ class SysVarCapability
       descs_[i].comment = descs[i].comment;
       descs_[i].type = static_cast<vef_var_type_t>(descs[i].type);
       descs_[i].on_change = descs[i].on_change_fn;
+      descs_[i].required_privilege = descs[i].required_privilege;
       switch (descs[i].type) {
         case BOOL:
           descs_[i].boolean.value_ptr = descs[i].boolean.value_ptr;

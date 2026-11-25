@@ -24,7 +24,17 @@
 #include "villagesql/sdk/include/villagesql/abi/types.h"
 #include "villagesql/services/capability_registry.h"
 
+class THD;
+class sys_var;
+
 namespace villagesql::services {
+
+// Called by SET for each variable it assigns. If `var` belongs to an extension
+// and requires a privilege that the current account lacks, raises
+// ER_SPECIFIC_ACCESS_DENIED_ERROR and returns true. Returns false otherwise,
+// and always when the statement is not a SET, so the server's internal writes
+// are not checked.
+bool check_sys_var_set_privilege(THD *thd, sys_var *var);
 
 // Returns the server-side vtable for the "vsql::sys_var" preview capability.
 vef_preview_sys_var_t *preview_sys_var_vtable();

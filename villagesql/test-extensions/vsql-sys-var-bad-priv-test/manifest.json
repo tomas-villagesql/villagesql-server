@@ -1,0 +1,7 @@
+{
+  "name": "vsql_sys_var_bad_priv_test",
+  "version": "0.0.1",
+  "description": "VillageSQL extension testing that a system variable cannot require a static privilege",
+  "author": "VillageSQL Community",
+  "license": "GPL-2.0"
+}

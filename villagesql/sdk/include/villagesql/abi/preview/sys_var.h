@@ -107,6 +107,20 @@ typedef struct {
   // Optional. Called after the server writes a new value. May be NULL.
   vef_sys_var_on_change_func_t on_change;
 
+  // Optional. The privilege an account must hold to set this variable, on top
+  // of the SYSTEM_VARIABLES_ADMIN that SET GLOBAL and SET PERSIST already
+  // require. NULL or "" means none. It must name a dynamic privilege: either
+  // one MySQL defines, such as SESSION_VARIABLES_ADMIN, or a new name, which
+  // the server registers when the extension loads. A static privilege such as
+  // SUPER or PROCESS is refused, and so is a name that is not 1-32 ASCII
+  // letters, digits and underscores.
+  //
+  // The check covers every SET statement on the variable, including
+  // SET ... = DEFAULT and SET PERSIST_ONLY. It does not apply when the
+  // extension sets the variable through vef_preview_sys_var_t, or when the
+  // server applies a persisted value.
+  const char *required_privilege;
+
   // Type-specific storage and constraints. Only the field matching type is
   // used.
   union {

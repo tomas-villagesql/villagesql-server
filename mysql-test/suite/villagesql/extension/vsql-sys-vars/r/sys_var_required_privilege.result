@@ -1,0 +1,121 @@
+call mtr.add_suppression("which is not a dynamic privilege name");
+SET PERSIST vsql_allow_preview_extensions = ON;
+# A variable cannot require a static privilege: INSTALL fails and
+# registers none of the extension's variables
+INSTALL EXTENSION vsql_sys_var_bad_priv_test;
+ERROR HY000: Failed to load VEF extension 'vsql_sys_var_bad_priv_test': System variable 'needs_super' requires privilege 'SUPER', which is not a dynamic privilege name
+SELECT @@global.vsql_sys_var_bad_priv_test.first;
+ERROR HY000: Unknown system variable 'vsql_sys_var_bad_priv_test.first'
+INSTALL EXTENSION vsql_sys_var_priv_test;
+# Loading the extension registered its privilege, so it can be granted
+CREATE USER u_plain@localhost, u_admin@localhost, u_key@localhost;
+GRANT SYSTEM_VARIABLES_ADMIN, PERSIST_RO_VARIABLES_ADMIN ON *.*
+TO u_plain@localhost, u_admin@localhost, u_key@localhost;
+GRANT VSQL_SYS_VAR_PRIV_TEST_ADMIN ON *.* TO u_admin@localhost;
+GRANT ENCRYPTION_KEY_ADMIN ON *.* TO u_key@localhost;
+SHOW GRANTS FOR u_admin@localhost;
+Grants for u_admin@localhost
+GRANT USAGE ON *.* TO `u_admin`@`localhost`
+GRANT PERSIST_RO_VARIABLES_ADMIN,SYSTEM_VARIABLES_ADMIN,VSQL_SYS_VAR_PRIV_TEST_ADMIN ON *.* TO `u_admin`@`localhost`
+CREATE PROCEDURE test.set_guarded(v INT) SQL SECURITY INVOKER
+SET GLOBAL vsql_sys_var_priv_test.guarded = v;
+GRANT EXECUTE ON PROCEDURE test.set_guarded TO u_plain@localhost,
+u_admin@localhost;
+# root was not granted the new privilege, so it cannot set guarded
+SET GLOBAL vsql_sys_var_priv_test.guarded = 5;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+# Without the privilege, every form of SET on guarded is refused
+SET GLOBAL vsql_sys_var_priv_test.guarded = 5;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+SET @@global.vsql_sys_var_priv_test.guarded = 5;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+SET GLOBAL vsql_sys_var_priv_test.guarded = DEFAULT;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+SET PERSIST vsql_sys_var_priv_test.guarded = 5;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+SET PERSIST_ONLY vsql_sys_var_priv_test.guarded = 5;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+PREPARE s FROM 'SET GLOBAL vsql_sys_var_priv_test.guarded = 5';
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+CALL test.set_guarded(5);
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+# A SET that also assigns guarded is refused as a whole
+SET GLOBAL vsql_sys_var_priv_test.open = 7,
+vsql_sys_var_priv_test.guarded = 5;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+SELECT @@global.vsql_sys_var_priv_test.open;
+@@global.vsql_sys_var_priv_test.open
+1
+# guarded is unchanged, and reading it needs no privilege
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+1
+# A variable that requires nothing is still settable
+SET GLOBAL vsql_sys_var_priv_test.open = 7;
+SELECT @@global.vsql_sys_var_priv_test.open;
+@@global.vsql_sys_var_priv_test.open
+7
+# key_label requires ENCRYPTION_KEY_ADMIN
+SET GLOBAL vsql_sys_var_priv_test.key_label = 'plain';
+ERROR 42000: Access denied; you need (at least one of) the ENCRYPTION_KEY_ADMIN privilege(s) for this operation
+# The extension's own write is not a SET statement and is not checked
+SELECT vsql_sys_var_priv_test.write_guarded(6) AS err;
+err
+0
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+6
+# With the privilege, every form of SET on guarded works
+SET GLOBAL vsql_sys_var_priv_test.guarded = 10;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+10
+SET GLOBAL vsql_sys_var_priv_test.guarded = DEFAULT;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+1
+SET PERSIST vsql_sys_var_priv_test.guarded = 20;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+20
+SET PERSIST_ONLY vsql_sys_var_priv_test.guarded = 30;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+20
+CALL test.set_guarded(40);
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+40
+# A prepared SET runs more than once
+PREPARE s FROM 'SET GLOBAL vsql_sys_var_priv_test.guarded = ?';
+SET @v = 50;
+EXECUTE s USING @v;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+50
+SET @v = 60;
+EXECUTE s USING @v;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+60
+DEALLOCATE PREPARE s;
+# The privilege for guarded does not cover key_label
+SET GLOBAL vsql_sys_var_priv_test.key_label = 'admin';
+ERROR 42000: Access denied; you need (at least one of) the ENCRYPTION_KEY_ADMIN privilege(s) for this operation
+# ENCRYPTION_KEY_ADMIN covers key_label but not guarded
+SET GLOBAL vsql_sys_var_priv_test.key_label = 'key';
+SELECT @@global.vsql_sys_var_priv_test.key_label;
+@@global.vsql_sys_var_priv_test.key_label
+key
+SET GLOBAL vsql_sys_var_priv_test.guarded = 70;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+# Revoking the privilege takes effect for a new session
+REVOKE VSQL_SYS_VAR_PRIV_TEST_ADMIN ON *.* FROM u_admin@localhost;
+SET GLOBAL vsql_sys_var_priv_test.guarded = 80;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+RESET PERSIST vsql_sys_var_priv_test.guarded;
+DROP PROCEDURE test.set_guarded;
+DROP USER u_plain@localhost, u_admin@localhost, u_key@localhost;
+UNINSTALL EXTENSION vsql_sys_var_priv_test;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

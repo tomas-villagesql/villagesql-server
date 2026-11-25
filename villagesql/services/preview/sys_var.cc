@@ -22,14 +22,24 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "my_sys.h"
 #include "mysql/components/my_service.h"
 #include "mysql/components/services/component_sys_var_service.h"
+#include "mysql/components/services/dynamic_privilege.h"
 #include "mysql/components/services/mysql_string.h"
 #include "mysql/components/services/mysql_system_variable.h"
+#include "mysql/strings/m_ctype.h"
+#include "mysqld_error.h"
+#include "sql/auth/auth_acls.h"
+#include "sql/auth/sql_security_ctx.h"
 #include "sql/persisted_variable.h"
+#include "sql/set_var.h"
+#include "sql/sql_class.h"
+#include "sql/sql_lex.h"
 #include "sql/sql_plugin_var.h"
 #include "villagesql/include/error.h"
 #include "villagesql/sdk/include/villagesql/abi/preview/sys_var.h"
@@ -65,6 +75,9 @@ struct RegisteredSysVar {
   // Back-pointer to the descriptor list this var came from, used as the
   // depopulate key.
   const void *capability_config;
+  // The name MySQL gives the variable, "<extension>.<variable>" lower-cased
+  // the way component_sys_variable_register does it. Keys g_var_privileges.
+  std::string full_name;
   // For VEF_VAR_ENUM only: the TYPE_LIB listing the variable's allowed values,
   // and its fully server-owned backing arrays. register_variable stores the
   // TYPE_LIB pointer (it does not deep-copy), so it must outlive the registered
@@ -82,6 +95,81 @@ struct RegisteredSysVar {
 
 std::mutex g_sys_vars_mutex;
 std::vector<RegisteredSysVar> g_sys_vars;
+
+// The privilege needed to SET a variable, keyed by RegisteredSysVar::full_name.
+// Only variables that require one have an entry. It is kept apart from
+// g_sys_vars because an entry must outlive the variable's registration with
+// MySQL: it is added before register_variable and removed after
+// unregister_variable, so no SET can reach the variable unchecked. Guarded by
+// g_sys_vars_mutex.
+std::unordered_map<std::string, std::string> g_var_privileges;
+
+// The name MySQL registers the variable under. See RegisteredSysVar::full_name.
+std::string sys_var_full_name(const std::string &extension_name,
+                              const char *var_name) {
+  std::string full_name = extension_name + "." + var_name;
+  my_casedn_str(&my_charset_latin1, full_name.data());
+  return full_name;
+}
+
+// Upper-cases the variable's required privilege into `out`, the form MySQL
+// keeps dynamic privileges in. Leaves `out` empty when the variable requires
+// none. Returns true, with error_message set, when the name cannot be a
+// dynamic privilege: it is malformed, or it names a static privilege, which
+// has_global_grant() does not see.
+bool normalize_required_privilege(const vef_sys_var_desc_t &v, std::string &out,
+                                  std::string &error_message) {
+  out.clear();
+  if (v.required_privilege == nullptr || v.required_privilege[0] == '\0')
+    return false;
+  const std::string_view name(v.required_privilege);
+  // mysql.global_grants.PRIV is CHAR(32).
+  const bool well_formed =
+      name.size() <= 32 && std::ranges::all_of(name, [](char c) {
+        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+               (c >= '0' && c <= '9') || c == '_';
+      });
+  if (well_formed) {
+    for (const char c : name)
+      out.push_back(c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A')
+                                         : c);
+    if (std::ranges::find(global_acls_vector, out) == global_acls_vector.end())
+      return false;
+  }
+  out.clear();
+  error_message = std::string("System variable '") + v.name +
+                  "' requires privilege '" + std::string(name) +
+                  "', which is not a dynamic privilege name";
+  return true;
+}
+
+// Registers each non-empty name as a dynamic privilege so that GRANT accepts
+// it. A name MySQL already knows is left as it is. The names stay registered
+// after the extension unloads, since one may be a MySQL privilege or guard
+// another extension's variable, and MySQL registers every name it finds in
+// mysql.global_grants anyway.
+bool register_required_privileges(SERVICE_TYPE(registry) * registry,
+                                  const std::vector<std::string> &privileges,
+                                  std::string &error_message) {
+  if (std::ranges::all_of(privileges,
+                          [](const std::string &p) { return p.empty(); }))
+    return false;
+  my_service<SERVICE_TYPE(dynamic_privilege_register)> priv_svc(
+      "dynamic_privilege_register.mysql_server", registry);
+  if (!priv_svc.is_valid()) {
+    error_message =
+        "on_populate_sys_var: dynamic_privilege_register unavailable";
+    return true;
+  }
+  for (const std::string &p : privileges) {
+    if (p.empty()) continue;
+    if (priv_svc->register_privilege(p.c_str(), p.size())) {
+      error_message = "Failed to register privilege '" + p + "'";
+      return true;
+    }
+  }
+  return false;
+}
 
 // Generic update trampoline used when on_change is non-null.
 // Performs the default typed update (mirroring MySQL's update_func_* family)
@@ -195,6 +283,8 @@ std::vector<RegisteredSysVar> extract_registered_vars(
   return extracted;
 }
 
+// Unregisters the variables from MySQL, then drops their required
+// privileges, which a SET could still need until then.
 void unregister_vars(SERVICE_TYPE(registry) * registry,
                      const std::vector<RegisteredSysVar> &vars) {
   my_service<SERVICE_TYPE(component_sys_variable_unregister)> unreg_svc(
@@ -203,11 +293,36 @@ void unregister_vars(SERVICE_TYPE(registry) * registry,
   for (const RegisteredSysVar &rv : vars)
     unreg_svc->unregister_variable(rv.extension_name.c_str(),
                                    rv.var_name.c_str());
+  std::lock_guard<std::mutex> lock(g_sys_vars_mutex);
+  for (const RegisteredSysVar &rv : vars) g_var_privileges.erase(rv.full_name);
 }
 
 }  // namespace
 
 vef_preview_sys_var_t *preview_sys_var_vtable() { return &g_sys_var_vtable; }
+
+bool check_sys_var_set_privilege(THD *thd, sys_var *var) {
+  // Only a SET statement is checked. The server's own writes, such as applying
+  // a persisted value or the update service behind vef_preview_sys_var_t, run
+  // under a fresh LEX whose sql_command is SQLCOM_END.
+  if (thd->lex->sql_command != SQLCOM_SET_OPTION ||
+      var->cast_pluginvar() == nullptr)
+    return false;
+
+  std::string privilege;
+  {
+    std::lock_guard<std::mutex> lock(g_sys_vars_mutex);
+    const auto it = g_var_privileges.find(var->name.str);
+    if (it == g_var_privileges.end()) return false;
+    privilege = it->second;
+  }
+  if (thd->security_context()
+          ->has_global_grant(privilege.c_str(), privilege.size())
+          .first)
+    return false;
+  my_error(ER_SPECIFIC_ACCESS_DENIED_ERROR, MYF(0), privilege.c_str());
+  return true;
+}
 
 // The declared type of a variable this extension registered, or nullopt if it
 // registered no such name. Each setter checks the type it is for: a name
@@ -347,8 +462,25 @@ bool on_populate_sys_var(const PopulateContext &ctx,
     return true;
   }
 
+  // Check every required privilege before registering anything, so a bad name
+  // fails the load with nothing to roll back.
+  std::vector<std::string> required_privileges(list->var_count);
+  for (uint32_t i = 0; i < list->var_count; i++) {
+    if (normalize_required_privilege(*list->vars[i], required_privileges[i],
+                                     error_message)) {
+      LogVSQL(ERROR_LEVEL, "%s", error_message.c_str());
+      return true;
+    }
+  }
+  if (register_required_privileges(registry, required_privileges,
+                                   error_message)) {
+    LogVSQL(ERROR_LEVEL, "%s", error_message.c_str());
+    return true;
+  }
+
   for (uint32_t i = 0; i < list->var_count; i++) {
     const vef_sys_var_desc_t *v = list->vars[i];
+    const std::string full_name = sys_var_full_name(extension_name, v->name);
     int flags = PLUGIN_VAR_RQCMDARG;
     void *check_arg = nullptr;
     void *value_ptr = nullptr;
@@ -423,11 +555,16 @@ bool on_populate_sys_var(const PopulateContext &ctx,
     // Record the variable before registering it: register_variable applies an
     // already-persisted value inline, and the trampoline looks the variable up
     // by storage pointer to find its on_change. Registering first would skip
-    // that callback for the persisted value.
+    // that callback for the persisted value. The required privilege is
+    // recorded first too, so a SET that reaches the variable the moment it is
+    // registered is already checked.
     {
       std::lock_guard<std::mutex> lock(g_sys_vars_mutex);
+      if (!required_privileges[i].empty())
+        g_var_privileges.insert_or_assign(full_name, required_privileges[i]);
       g_sys_vars.push_back({extension_name, std::string(v->name), v->type,
                             value_ptr, v->on_change, ctx.capability_config,
+                            full_name,
                             /*enum_names=*/{},
                             /*enum_name_ptrs=*/{},
                             /*enum_name_lengths=*/{},
@@ -477,6 +614,7 @@ bool on_populate_sys_var(const PopulateContext &ctx,
           return rv.capability_config == ctx.capability_config &&
                  rv.value_ptr == value_ptr;
         });
+        g_var_privileges.erase(full_name);
       }
       LogVSQL(ERROR_LEVEL,
               "Failed to register system variable '%s' for extension '%s'",

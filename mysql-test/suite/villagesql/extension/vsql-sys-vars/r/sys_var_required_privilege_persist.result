@@ -1,0 +1,40 @@
+CALL mtr.add_suppression("Currently unknown variable 'vsql_sys_var_priv_test.guarded' was read from the persisted config file.");
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_sys_var_priv_test;
+CREATE USER u_admin@localhost;
+GRANT SYSTEM_VARIABLES_ADMIN, VSQL_SYS_VAR_PRIV_TEST_ADMIN ON *.*
+TO u_admin@localhost;
+SET PERSIST vsql_sys_var_priv_test.guarded = 200;
+# root does not hold the privilege
+SET GLOBAL vsql_sys_var_priv_test.guarded = 5;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+# Restart with the extension installed: the startup load applies the
+# persisted value
+# restart: --veb-dir=MYSQLTEST_VARDIR/mysqld.1/veb/
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+200
+# The grant survived the restart
+SET PERSIST vsql_sys_var_priv_test.guarded = 300;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+300
+# UNINSTALL deletes the persisted value; restore the saved file so the
+# entry survives for an extension that is no longer installed
+UNINSTALL EXTENSION vsql_sys_var_priv_test;
+# Restart: the extension is not installed, so the persisted entry is
+# parked as an unknown variable
+# restart: --veb-dir=MYSQLTEST_VARDIR/mysqld.1/veb/
+# root installs the extension, which applies the parked value although
+# root does not hold the privilege
+INSTALL EXTENSION vsql_sys_var_priv_test;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+@@global.vsql_sys_var_priv_test.guarded
+300
+SET GLOBAL vsql_sys_var_priv_test.guarded = 5;
+ERROR 42000: Access denied; you need (at least one of) the VSQL_SYS_VAR_PRIV_TEST_ADMIN privilege(s) for this operation
+RESET PERSIST vsql_sys_var_priv_test.guarded;
+DROP USER u_admin@localhost;
+UNINSTALL EXTENSION vsql_sys_var_priv_test;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

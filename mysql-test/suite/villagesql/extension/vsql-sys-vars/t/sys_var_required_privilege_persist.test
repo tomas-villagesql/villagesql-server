@@ -1,0 +1,73 @@
+# A persisted value for a variable that requires a privilege is applied
+# whoever is running at the time: the server's startup thread when the
+# extension loads at startup, and the installing account on INSTALL EXTENSION.
+# Neither holds VSQL_SYS_VAR_PRIV_TEST_ADMIN here. The privilege was checked
+# when the value was persisted. A grant of the privilege also survives a
+# restart.
+#
+# Getting a persisted entry for an uninstalled extension: UNINSTALL EXTENSION
+# deletes persisted values on the way out, so the file is saved beforehand and
+# restored after, leaving the entry behind for the next INSTALL to apply.
+
+CALL mtr.add_suppression("Currently unknown variable 'vsql_sys_var_priv_test.guarded' was read from the persisted config file.");
+
+SET PERSIST vsql_allow_preview_extensions = ON;
+INSTALL EXTENSION vsql_sys_var_priv_test;
+
+CREATE USER u_admin@localhost;
+GRANT SYSTEM_VARIABLES_ADMIN, VSQL_SYS_VAR_PRIV_TEST_ADMIN ON *.*
+  TO u_admin@localhost;
+
+--connect (admin, localhost, u_admin,,)
+SET PERSIST vsql_sys_var_priv_test.guarded = 200;
+--disconnect admin
+--connection default
+
+--echo # root does not hold the privilege
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET GLOBAL vsql_sys_var_priv_test.guarded = 5;
+
+--echo # Restart with the extension installed: the startup load applies the
+--echo # persisted value
+--let $veb_dir = `SELECT @@veb_dir`
+--replace_result $MYSQLTEST_VARDIR MYSQLTEST_VARDIR
+--let $restart_parameters = restart: --veb-dir=$veb_dir
+--source include/restart_mysqld.inc
+
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+
+--echo # The grant survived the restart
+--connect (admin, localhost, u_admin,,)
+SET PERSIST vsql_sys_var_priv_test.guarded = 300;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+--disconnect admin
+--connection default
+
+--let $datadir = `SELECT @@datadir`
+--copy_file $datadir/mysqld-auto.cnf $MYSQLTEST_VARDIR/tmp/auto_with_persist.cnf
+
+--echo # UNINSTALL deletes the persisted value; restore the saved file so the
+--echo # entry survives for an extension that is no longer installed
+UNINSTALL EXTENSION vsql_sys_var_priv_test;
+--remove_file $datadir/mysqld-auto.cnf
+--copy_file $MYSQLTEST_VARDIR/tmp/auto_with_persist.cnf $datadir/mysqld-auto.cnf
+--remove_file $MYSQLTEST_VARDIR/tmp/auto_with_persist.cnf
+
+--echo # Restart: the extension is not installed, so the persisted entry is
+--echo # parked as an unknown variable
+--replace_result $MYSQLTEST_VARDIR MYSQLTEST_VARDIR
+--let $restart_parameters = restart: --veb-dir=$veb_dir
+--source include/restart_mysqld.inc
+
+--echo # root installs the extension, which applies the parked value although
+--echo # root does not hold the privilege
+INSTALL EXTENSION vsql_sys_var_priv_test;
+SELECT @@global.vsql_sys_var_priv_test.guarded;
+--error ER_SPECIFIC_ACCESS_DENIED_ERROR
+SET GLOBAL vsql_sys_var_priv_test.guarded = 5;
+
+RESET PERSIST vsql_sys_var_priv_test.guarded;
+DROP USER u_admin@localhost;
+UNINSTALL EXTENSION vsql_sys_var_priv_test;
+SET PERSIST vsql_allow_preview_extensions = OFF;
+RESET PERSIST vsql_allow_preview_extensions;

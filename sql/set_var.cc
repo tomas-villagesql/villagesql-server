@@ -1,4 +1,5 @@
 /* Copyright (c) 2002, 2026, Oracle and/or its affiliates.
+   Copyright (c) 2026 VillageSQL Contributors
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License, version 2.0,
@@ -79,6 +80,7 @@
 #include "sql_string.h"
 #include "string_with_len.h"
 #include "strxnmov.h"
+#include "villagesql/services/preview/sys_var.h"
 
 using std::min;
 using std::string;
@@ -1680,6 +1682,8 @@ int set_var::resolve(THD *thd) {
         return -1;
       }
     }
+    // VillageSQL: an extension variable can require a privilege to be set.
+    if (villagesql::services::check_sys_var_set_privilege(thd, var)) return -1;
 
     /* check if read/write non-persistent variables can be persisted */
     if ((type == OPT_PERSIST || type == OPT_PERSIST_ONLY) &&
@@ -1786,14 +1790,15 @@ int set_var::check(THD *thd) {
     -1   ERROR, message not sent
 */
 int set_var::light_check(THD *thd) {
-  auto f = [this](const System_variable_tracker &, sys_var *var) -> bool {
+  auto f = [this, thd](const System_variable_tracker &, sys_var *var) -> bool {
     if (!var->check_scope(type)) {
       const int err =
           (is_global_persist()) ? ER_LOCAL_VARIABLE : ER_GLOBAL_VARIABLE;
       my_error(err, MYF(0), var->name.str);
       return true;
     }
-    return false;
+    // VillageSQL: an extension variable can require a privilege to be set.
+    return villagesql::services::check_sys_var_set_privilege(thd, var);
   };
   if (m_var_tracker.access_system_variable<bool>(thd, f).value_or(true)) {
     return -1;
